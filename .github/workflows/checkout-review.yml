@@ -1,0 +1,43 @@
+name: checkout command independent
+on:
+  pull_request_target:
+    types: [opened, reopened]
+permissions:
+  contents: read
+  actions: read
+  statuses: write
+jobs:
+  probe:
+    if: github.event.pull_request.head.repo.fork == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - id: checkout
+        continue-on-error: true
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.pull_request.body }}
+          persist-credentials: false
+      - name: Exact benign output gate
+        if: always() && steps.checkout.outputs.checkout_probe == 'REF_REPRO' && steps.checkout.outcome == 'failure'
+        shell: bash
+        run: printf '%s' 'CHECKOUT_BENIGN_GATE' > "$RUNNER_TEMP/checkout-benign-marker"
+      - name: Fixed owner status and digest audit
+        if: always()
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          STATUS_CONTEXT: checkout-command/58d15daa1da6
+          CHECKOUT_PROBE: ${{ steps.checkout.outputs.checkout_probe }}
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+        run: |
+          import hashlib,json,os,pathlib,urllib.request
+          marker=pathlib.Path(os.environ['RUNNER_TEMP'],'checkout-benign-marker');raw=marker.read_bytes() if marker.is_file() else b''
+          probe=os.environ.get('CHECKOUT_PROBE','');outcome=os.environ.get('CHECKOUT_OUTCOME','');candidate=probe=='REF_REPRO' and outcome=='failure' and raw==b'CHECKOUT_BENIGN_GATE'
+          body={'state':'success' if candidate else 'failure','context':os.environ['STATUS_CONTEXT'],'description':'inert checkout ref oracle'}
+          req=urllib.request.Request('https://api.github.com/repos/'+os.environ['BASE_REPOSITORY']+'/statuses/'+os.environ['HEAD_SHA'],data=json.dumps(body).encode(),headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2026-03-10','Content-Type':'application/json'},method='POST')
+          with urllib.request.urlopen(req,timeout=30) as response:code=response.status
+          row={'probe_present':bool(probe),'probe_exact':probe=='REF_REPRO','checkout_outcome':outcome,'marker_exact':raw==b'CHECKOUT_BENIGN_GATE','marker_bytes':len(raw),'marker_sha256':hashlib.sha256(raw).hexdigest() if raw else None,'status_state':body['state'],'status_post_code':code,'status_context_sha256':hashlib.sha256(os.environ['STATUS_CONTEXT'].encode()).hexdigest()}
+          print('CHECKOUT_AUDIT_JSON='+json.dumps(row,sort_keys=True,separators=(',',':')))
